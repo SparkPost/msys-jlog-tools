@@ -1,0 +1,132 @@
+#!/opt/msys/3rdParty/bin/perl
+#
+# Copyright (c) 2012-2014 Message Systems, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+#
+# This is like the cat command, but on a jlog.
+# Example usage:
+#
+#   jlogcat /var/log/ecelerity/foo.jlog
+#
+
+#
+# TODO: perldoc + use of Pod::Usage for command-line help
+#
+
+use strict;
+use warnings;
+use JLog::Reader;
+use Getopt::Long;
+
+# catch ctrl-c so we can shut down (more) cleanly
+our $shutdown_requested = 0;
+sub flag_shutdown { $shutdown_requested = 1 }
+$SIG{PIPE} = $SIG{TERM} = $SIG{INT} = \&flag_shutdown;
+
+my %cfg = (
+  debug => 0,
+  escape => 1,
+  # Disable auto-checkpointing by default.
+  checkpoint => 0,
+  # 0 means unlimited.
+  nlines     => 0,
+  # Use a temporary subscriber.
+  subscriber => $$ .'-'. time,
+);
+# so we can check (after parsing command line options)
+# whether config has changed from defaults
+my %cfg_defaults = (%cfg);
+
+my $USAGE = <<USAGE;
+$0 [options] <filename>
+  --debug
+    Turn on some extra debugging output
+  --escape / --no-escape
+    automatically escape non-printable characters (defaults to on)
+  --nlines N
+    Display the first N lines (like the 'head' command)
+  --subscriber <subscriber>
+    open jlog using the specified subscriber
+    a temporary subscriber is used by default
+  --checkpoint
+    Turn on auto-checkpointing, for destructive cat'ting of jlogs
+
+Example of discarding the first 200 records from a jlog:
+
+jlogcat --subscriber=master -n 200 --checkpoint /var/log/ecelerity/ts_stats.jlog
+USAGE
+
+if (not GetOptions(
+  'd|debug'      => \$cfg{debug},
+  'escape!'      => \$cfg{escape},
+  'checkpoint'   => \$cfg{checkpoint},
+  'nlines=i'     => \$cfg{nlines},
+  'subscriber=s' => \$cfg{subscriber},
+)) {
+  print STDERR $USAGE;
+  exit(1);
+}
+
+my $filename = $ARGV[0] or die $USAGE;
+
+my $r = new JLog::Reader($filename)
+  or die "Unable to open $filename: $!";
+
+$r->auto_checkpoint($cfg{checkpoint});
+if ($cfg{debug}) {
+  my $msg = "NOTICE: Auto-checkpoint is ";
+  if ($cfg{checkpoint}) {
+    $msg .= "enabled\n";
+  } else {
+    $msg .= "disabled\n";
+  }
+  print $msg;
+}
+
+$r->add_subscriber($cfg{subscriber});
+$r->open($cfg{subscriber}) or die "Unable to open subscriber $cfg{subscriber}: $!";
+
+my $nlines = 0;
+
+while (my $line = ($r->read())) {
+  last if $shutdown_requested;
+
+  if ($cfg{escape}) {
+    # escape non-printable characters for human-readable display
+    $line =~ s/([^[:print:]])/sprintf('\\%03x', ord($1))/eg;
+  }
+  print "$line\n";
+
+  ++$nlines;
+  last if (($cfg{nlines} > 0) && ($nlines >= $cfg{nlines}));
+}
+
+if ($shutdown_requested) {
+  print "NOTICE: exiting on user cancellation (output may be incomplete)\n";
+}
+
+END {
+  if ($r) {
+    if ($cfg{subscriber} eq $cfg_defaults{subscriber}) {
+      if ($cfg{debug}) {
+        print "NOTICE: removing temporary subscriber [$cfg{subscriber}]\n";
+      }
+      $r->remove_subscriber($cfg{subscriber});
+    }
+    $r->close();
+  }
+}
+

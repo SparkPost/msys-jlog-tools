@@ -1,0 +1,168 @@
+#!/opt/msys/3rdParty/bin/perl
+#
+# Copyright (c) 2011-2014 Message Systems, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+#
+# This is like the tail command, but on a jlog.
+# Example usage:
+#
+#   jlogtail -f /var/log/ecelerity/foo.jlog
+#
+
+# TODO: Support destructive tailing of data, by checkpointing
+# data as it's read.
+#
+# TODO: perldoc + use of Pod::Usage for command-line help
+#
+
+use strict;
+use warnings;
+use JLog::Reader;
+use Getopt::Long;
+use Time::HiRes 'time';
+
+# catch ctrl-c so we can shut down (more) cleanly
+our $shutdown_requested = 0;
+sub flag_shutdown { $shutdown_requested = 1 }
+$SIG{PIPE} = $SIG{TERM} = $SIG{INT} = \&flag_shutdown;
+
+my %cfg = (
+  escape     => 1,
+  head       => 0,
+  follow     => 0,
+  nlines     => 20,
+  subscriber => 'master',
+);
+# so we can check (after parsing command line options)
+# whether config has changed from defaults
+my %cfg_defaults = (%cfg);
+
+my $USAGE = <<USAGE;
+$0 [options] <filename>
+  --escape / --no-escape
+    automatically escape non-printable characters (defaults to on)
+  --head N
+    display the first N lines and exit
+  --follow
+    display new lines as they are added
+  --nlines N
+    display last N lines on startup
+    (defaults to [$cfg{nlines}])
+  --subscriber <subscriber>
+    open jlog using the specified subscriber
+    follow mode uses a temporary subscriber
+    (defaults to [$cfg{subscriber}])
+USAGE
+
+if (not GetOptions(
+  'escape!'      => \$cfg{escape},
+  'head=i'       => \$cfg{head},
+  'follow'       => \$cfg{follow},
+  'nlines=i'     => \$cfg{nlines},
+  'subscriber=s' => \$cfg{subscriber},
+)) {
+  print STDERR $USAGE;
+  exit(1);
+}
+
+if ($cfg{head} and $cfg{follow}) {
+  print "NOTICE: both --head and --follow specified, using --head\n";
+  $cfg{follow} = 0;
+}
+
+$cfg{nlines} = $cfg{head} if $cfg{head};
+
+if ($cfg{follow} and $cfg{subscriber} ne $cfg_defaults{subscriber}) {
+  print "NOTICE: a temporary subscriber is used in follow mode\n";
+}
+
+my $filename = $ARGV[0] or die $USAGE;
+
+my $r = new JLog::Reader($filename)
+  or die "Unable to open $filename: $!";
+
+if ($cfg{follow}) {
+  # Explicitly disable auto-checkpointing.
+  $r->auto_checkpoint(0);
+
+  # use a temporary subscriber for follow mode, and start reading
+  # at the end.
+  # XXX: FIXME: Show last N lines somehow. How do we seek to end - N?
+  # XXX: maybe we can fake it by hacking together a subscriber pointer
+  # XXX:   that points to near the end of the jlog data, since i'm
+  # XXX:   guessing the pointer consists only of a segment file name
+  # XXX:   and offset
+  $cfg{subscriber} = $$ .'-'. time;
+  $r->add_subscriber($cfg{subscriber}, JLog::JLOG_END);
+} else {
+  # Explicitly disable auto-checkpointing.
+  $r->auto_checkpoint(0);
+  $r->add_subscriber($cfg{subscriber});
+}
+$r->open($cfg{subscriber}) or die "Unable to open subscriber $cfg{subscriber}: $!";
+
+my @linebuf = ();
+my $first = 1;
+
+# Autoflush, so there's no delay in spewing out output,
+# e.g.: for piped commands.
+$| = 1;
+
+while (1) {
+  last if $shutdown_requested;
+  READ:
+  while (my $line = ($r->read())) {
+    last if $shutdown_requested;
+
+    if ($cfg{escape}) {
+      # escape non-printable characters for human-readable display
+      $line =~ s/([^[:print:]])/sprintf('\\%03x', ord($1))/eg;
+    }
+    if ($first) {
+      push @linebuf, $line;
+      my $n = scalar(@linebuf);
+      last READ if $cfg{head} and $n == $cfg{nlines};
+      shift @linebuf if $n > $cfg{nlines};
+    } else {
+      print "$line\n";
+    }
+  }
+  if ($first) {
+    for my $line (@linebuf) {
+      print "$line\n";
+    }
+  }
+  last if not $cfg{follow};
+  $first = 0 if $first;
+
+  # Wait for some more data.
+  last if $shutdown_requested;
+  last if $cfg{head};
+  sleep(1);
+}
+
+if ($shutdown_requested) {
+  print "NOTICE: exiting on user cancellation (output may be incomplete)\n";
+}
+
+END {
+  if ($cfg{follow} and $r) {
+    print "NOTICE: removing temporary subscriber [$cfg{subscriber}]\n";
+    $r->remove_subscriber($cfg{subscriber});
+  }
+  $r->close() if $r;
+}
+
