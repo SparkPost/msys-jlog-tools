@@ -15,7 +15,7 @@ This is like the cat command, but on a jlog. E.g.:
 For a jlog containing JSON records, you can use --no-escape and pipe
 the output into [jq](https://stedolan.github.io/jq/) for pretty-printing:
 
-```jlogcat /var/log/ecelerity/mo_report.rt --no-escape | jq .```
+```jlogcat /var/log/ecelerity/event_hydrant.rt --no-escape | jq .```
 
 See `jlogcat --help` for more details.
 
