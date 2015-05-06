@@ -5,6 +5,12 @@ Miscellaneous tools for JLog (journalled log) files
 
 See [https://labs.omniti.com/labs/jlog] for a description of JLogs.
 
+These scripts should only be run as the user that owns the JLog
+(e.g.: ecuser), otherwise it may result in permission problems
+that may affect the program writing to the JLog. This behaviour
+is not specific to msys-jlog-tools -- it is true of any tool
+using a JLog.
+
 jlogcat
 -------
 
